@@ -1,0 +1,61 @@
+# ==================== 构建产物 ====================
+/build/
+*.o
+*.d
+*.su
+*.elf
+*.hex
+*.bin
+*.map
+*.axf
+*.lst
+*.crf
+*.dep
+*.lnp
+*.sct
+*.htm
+*.a.bak
+
+# 由 tools/gen_compile_commands.py 生成，内含本机绝对路径，不入库
+/compile_commands.json
+
+# ==================== 个人 IDE / 编辑器配置 ====================
+# 含本机绝对路径（工具链、OpenOCD 位置），每人环境不同，各人本地配置即可
+/.vscode/
+/.idea/
+/.clangd/
+/.cache/
+*.uvguix.*
+*.uvoptx
+
+# ==================== 调试器个人配置 ====================
+# Ozone 的个人窗口布局/断点/打开的文件列表
+*.jdebug.user
+
+# ==================== Python ====================
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+
+# ==================== 系统垃圾 ====================
+Thumbs.db
+Desktop.ini
+.DS_Store
+*~
+
+# ==================== 体积大且非必需的文件（保留在本地，不入库） ====================
+# 上游 README 的演示动图（哨兵/工程/平衡），与本项目无关，共约 38 MB
+/.assets/sentry_infantry12.gif
+/.assets/engineering.gif
+/.assets/balance.gif
+
+# CMSIS-DSP 只用到 GCC 的 libarm_cortexM7lfdp_math.a（Makefile: LIBS = -larm_cortexM7lfdp_math）
+# 其余工具链的预编译库、示例与测试套件共约 170 MB，不入库
+/Drivers/CMSIS/DSP/Lib/IAR/
+/Drivers/CMSIS/DSP/Lib/ARM/
+/Drivers/CMSIS/DSP/Lib/GCC/*.a
+!/Drivers/CMSIS/DSP/Lib/GCC/libarm_cortexM7lfdp_math.a
+/Drivers/CMSIS/DSP/Examples/
+/Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
+/Drivers/CMSIS/DSP/PythonWrapper/

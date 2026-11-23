@@ -9,6 +9,9 @@
 #include "robot.h"
 #include "ins_task.h"
 #include "motor_task.h"
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
+#include "chassis.h"
+#endif
 #include "referee_task.h"
 #include "master_process.h"
 #include "daemon.h"
@@ -82,6 +85,9 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
     {
         motor_start = DWT_GetTimeline_ms();
         MotorControlTask();
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
+        ChassisMotorTask();
+#endif
         motor_dt = DWT_GetTimeline_ms() - motor_start;
         if (motor_dt > 1)
             LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);

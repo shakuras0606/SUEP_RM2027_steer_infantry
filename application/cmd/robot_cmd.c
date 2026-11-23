@@ -9,7 +9,6 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
-#include "steering.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -57,37 +56,29 @@ static float SwerveStick(int value)
     return value / 660.0f;
 }
 
-static void SetSwerveCommand(void)
+/**
+ * @brief 右侧开关选择底盘模式:下=无力,中=跟随云台,上=小陀螺
+ *        遥控离线/急停/机器人未就绪时强制无力,避免沿用上一周期的模式
+ *        旋转速度(wz)由底盘按当前模式生成,这里只给出模式和前进/横移速度
+ */
+static void SetChassisMode(void)
 {
-    static uint8_t released;
-
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     RC_ctrl_t rc = rc_data[TEMP];
     uint8_t online = RemoteControlIsOnline();
     __set_PRIMASK(mask);
 
-    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-    chassis_cmd_send.vx = chassis_cmd_send.vy = chassis_cmd_send.wz = 0;
-    chassis_cmd_send.offset_angle = 0;
-
     if (!online || !switch_is_down(rc.rc.switch_left) ||
-        rc.rc.dial > 300 || rc.rc.switch_right == 0 ||
-        switch_is_down(rc.rc.switch_right)) {
-        released = 0;
-        return;
+        rc.rc.switch_right == 0 || rc.rc.dial > 300 ||
+        robot_state != ROBOT_READY || switch_is_down(rc.rc.switch_right)) {
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_send.vx = chassis_cmd_send.vy = chassis_cmd_send.wz = 0;
+    } else if (switch_is_mid(rc.rc.switch_right)) {
+        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+    } else if (switch_is_up(rc.rc.switch_right)) {
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
     }
-
-    if (switch_is_up(rc.rc.switch_right)) {
-        released = 1;
-        return;
-    }
-    if (!released || robot_state != ROBOT_READY) return;
-
-    chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-    chassis_cmd_send.vx =  SW_VXY * SwerveStick(rc.rc.rocker_r1);
-    chassis_cmd_send.vy = -SW_VXY * SwerveStick(rc.rc.rocker_r_);
-    chassis_cmd_send.wz = -SW_WZ  * SwerveStick(rc.rc.rocker_l_);
 }
 
 void RobotCMDInit()
@@ -154,17 +145,9 @@ static void CalcOffsetAngle()
  */
 static void RemoteControlSet()
 {
-    // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
-    if (switch_is_down(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
-    {
-        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
-    }
-    else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
-    {
-        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
-    }
+    // 底盘模式由 SetChassisMode() 按右侧开关统一设置
+    // 云台使用陀螺仪反馈,与小陀螺/跟随模式配合
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
 
     // 云台参数,确定云台控制数据
     if (switch_is_mid(rc_data[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
@@ -180,15 +163,11 @@ static void RemoteControlSet()
     }
     // 云台软件限位
 
-    // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    // 底盘前进/横移由右摇杆给出,单位 m/s;旋转由底盘按当前模式生成
+    chassis_cmd_send.vx =  SW_VXY * SwerveStick(rc_data[TEMP].rc.rocker_r1);
+    chassis_cmd_send.vy = -SW_VXY * SwerveStick(rc_data[TEMP].rc.rocker_r_);
 
     // 发射参数
-    if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
-        ;                                            // 弹舱舵机控制,待添加servo_motor模块,开启
-    else
-        ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
     // 摩擦轮控制,拨轮向上打为负,向下为正
     if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
@@ -210,8 +189,8 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    chassis_cmd_send.vx = rc_data[TEMP].key[KEY_PRESS].w * 300 - rc_data[TEMP].key[KEY_PRESS].s * 300; // 系数待测
-    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].s * 300 - rc_data[TEMP].key[KEY_PRESS].d * 300;
+    chassis_cmd_send.vx = SW_VXY * (rc_data[TEMP].key[KEY_PRESS].w - rc_data[TEMP].key[KEY_PRESS].s);
+    chassis_cmd_send.vy = SW_VXY * (rc_data[TEMP].key[KEY_PRESS].a - rc_data[TEMP].key[KEY_PRESS].d);
 
     gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
     gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
@@ -308,8 +287,8 @@ static void EmergencyHandler()
         shoot_cmd_send.load_mode = LOAD_STOP;
         LOGERROR("[CMD] emergency stop!");
     }
-    // 遥控器右侧开关为[上],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right))
+    // 拨轮回中且右侧开关回到[下](无力档)才解除急停,避免从急停直接进入行驶档
+    if (switch_is_down(rc_data[TEMP].rc.switch_right) && rc_data[TEMP].rc.dial <= 300)
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -331,6 +310,8 @@ void RobotCMDTask()
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
 
+    // 每周期先清空速度指令,由当前控制模式重新填充,避免模式切换时沿用旧值
+    chassis_cmd_send.vx = chassis_cmd_send.vy = chassis_cmd_send.wz = 0;
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
     // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
@@ -340,7 +321,7 @@ void RobotCMDTask()
         MouseKeySet();
 
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
-    SetSwerveCommand();
+    SetChassisMode();   // 右侧开关选择底盘模式
 
     // 设置视觉发送数据,还需增加加速度和角速度数据
     // VisionSetFlag(chassis_fetch_data.enemy_color,,chassis_fetch_data.bullet_speed)

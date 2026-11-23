@@ -125,6 +125,7 @@ modules/master_machine/master_process.c \
 modules/master_machine/seasky_protocol.c \
 modules/motor/DJImotor/dji_motor.c \
 modules/motor/HTmotor/HT04.c \
+modules/motor/LKmotor/lk7015_motor.c \
 modules/motor/LKmotor/LK9025.c \
 modules/motor/DMmotor/dmmotor.c \
 modules/motor/step_motor/step_motor.c \

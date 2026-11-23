@@ -36,6 +36,16 @@
 #define REDUCTION_RATIO_LOADER 49.0f // 拨盘电机的减速比,英雄需要修改为3508的19.0f
 #define NUM_PER_CIRCLE 10            // 拨盘一圈的装载量
 // 机器人底盘修改的参数,单位为mm(毫米)
+#define SW_VXY       0.40f   // 遥控平移上限，m/s
+#define SW_WZ        1.00f   // 跟随角速度上限，rad/s
+#define SW_FOLLOW_KP 0.03f   // (rad/s)/deg
+#define SW_ROTATE_WZ 1.50f   // rad/s
+#define SW_VWHEEL    0.60f   // 轮缘速度上限，m/s
+#define SW_PMAX      12.5f   // MIT 参数 PMAX，rad
+#define SW_VMAX      30.0f   // VMAX，rad/s
+#define SW_TMAX      10.0f   // TMAX，N·m
+#define SW_KP        3.0f
+#define SW_KD        0.35f
 #define WHEEL_BASE 350              // 纵向轴距(前进后退方向)
 #define TRACK_WIDTH 300             // 横向轮距(左右平移方向)
 #define CENTER_GIMBAL_OFFSET_X 0    // 云台旋转中心距底盘几何中心的距离,前后方向,云台位于正中心时默认设为0
@@ -66,6 +76,10 @@ typedef enum
     ROBOT_STOP = 0,
     ROBOT_READY,
 } Robot_Status_e;
+
+typedef enum {
+    SWERVE_OFF, SWERVE_STARTING, SWERVE_RUNNING, SWERVE_FAULT
+} SwervePhase_e;
 
 // 应用状态
 typedef enum
@@ -138,9 +152,9 @@ typedef struct
 typedef struct
 {
     // 控制部分
-    float vx;           // 前进方向速度
-    float vy;           // 横移方向速度
-    float wz;           // 旋转速度
+    float vx;           // 车体系 x 向前，m/s
+    float vy;           // 车体系 y 向左，m/s
+    float wz;           // 逆时针为正，rad/s
     float offset_angle; // 底盘和归中位置的夹角
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
@@ -182,15 +196,15 @@ typedef struct
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
     // attitude_t chassis_imu_data;
 #endif
-    // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
-
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
 
+    // 在线和故障掩码的 bit 0..3 分别代表左前、右前、左后、右后。
+    uint8_t swerve_phase;       // SwervePhase_e
+    uint8_t steer_online_mask;
+    uint8_t drive_online_mask;
+    uint8_t fault_wheel_mask;
 } Chassis_Upload_Data_s;
 
 

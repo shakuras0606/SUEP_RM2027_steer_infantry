@@ -19,9 +19,6 @@ static Publisher_t *feed_pub;
 #define HALF_Y_M (TRACK_WIDTH * 0.0005f)
 #define WHEEL_DPS_PER_MPS (57.29577951f / (RADIUS_WHEEL * 0.001f))
 #define ALL_WHEELS ((1u << WHEEL_COUNT) - 1u)
-#define CONTROL_PERIOD_MS 5u
-#define FEEDBACK_TIMEOUT_MS 60u
-#define START_TIMEOUT_MS 500u
 
 typedef struct {
     uint16_t steer_tx, steer_rx;
@@ -31,10 +28,10 @@ typedef struct {
 
 static const WheelConfig_s wheel_config[WHEEL_COUNT] = {
     /* MIT CAN_ID / MST_ID，LK 节点号，轮心 x/y，安装零位，有符号舵传动比，轮向 */
-    [WHEEL_FL] = {0x001, 0x011, 1, { HALF_X_M,  HALF_Y_M, 0, 1, 1}},
-    [WHEEL_FR] = {0x002, 0x012, 2, { HALF_X_M, -HALF_Y_M, 0, 1, 1}},
-    [WHEEL_RL] = {0x003, 0x013, 3, {-HALF_X_M,  HALF_Y_M, 0, 1, 1}},
-    [WHEEL_RR] = {0x004, 0x014, 4, {-HALF_X_M, -HALF_Y_M, 0, 1, 1}},
+    [WHEEL_FL] = {0x001, 0x011, 1, { HALF_X_M,  HALF_Y_M, CHASSIS_FL_ZERO_RAD, 1, 1}},
+    [WHEEL_FR] = {0x002, 0x012, 2, { HALF_X_M, -HALF_Y_M, CHASSIS_FR_ZERO_RAD, 1, 1}},
+    [WHEEL_RL] = {0x003, 0x013, 3, {-HALF_X_M,  HALF_Y_M, CHASSIS_RL_ZERO_RAD, 1, 1}},
+    [WHEEL_RR] = {0x004, 0x014, 4, {-HALF_X_M, -HALF_Y_M, CHASSIS_RR_ZERO_RAD, 1, 1}},
 };
 
 typedef struct {
@@ -150,12 +147,12 @@ static WheelFeedback_s ReadWheels(uint32_t now)
         const volatile LK7015Measure_s *lk = &wheels[i].drive_motor->measure;
         uint8_t bit = 1u << i;
         result.position_rad[i] = dm->position_rad;
-        if (dm->valid && now - dm->updated_ms <= FEEDBACK_TIMEOUT_MS) {
+        if (dm->valid && now - dm->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS) {
             result.steer_online |= bit;
             if (dm->state == 1) result.steer_enabled |= bit;
             if (dm->state >= 8) result.steer_fault |= bit;
         }
-        if (lk->valid && now - lk->updated_ms <= FEEDBACK_TIMEOUT_MS)
+        if (lk->valid && now - lk->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS)
             result.drive_online |= bit;
     }
     return result;
@@ -173,7 +170,7 @@ static uint8_t SetWheelMode(uint8_t enabled)
 
 static void StopWheels(uint32_t now)
 {
-    if (stop_pending || now - last_stop_ms >= FEEDBACK_TIMEOUT_MS) {
+    if (stop_pending || now - last_stop_ms >= CHASSIS_FEEDBACK_TIMEOUT_MS) {
         uint8_t failed = SetWheelMode(0);
         last_stop_ms = now;
         stop_pending = failed != 0;
@@ -220,7 +217,7 @@ static void UpdateWheels(MotionCommand_s motion, uint8_t stop, const WheelFeedba
         StopWheels(now);
         return;
     }
-    if (now - motion.updated_ms > FEEDBACK_TIMEOUT_MS ||
+    if (now - motion.updated_ms > CHASSIS_FEEDBACK_TIMEOUT_MS ||
         !isfinite(motion.vx) || !isfinite(motion.vy) || !isfinite(motion.wz)) {
         TripFault(ALL_WHEELS, now);
         return;
@@ -242,11 +239,11 @@ static void UpdateWheels(MotionCommand_s motion, uint8_t stop, const WheelFeedba
 
     uint8_t missing = ALL_WHEELS & ~(f->steer_enabled & f->drive_online);
     if (phase == SWERVE_STARTING) {
-        if (now - start_ms > START_TIMEOUT_MS) {
+        if (now - start_ms > CHASSIS_START_TIMEOUT_MS) {
             TripFault(missing ? missing : ALL_WHEELS, now);
             return;
         }
-        if (missing || now - start_ms <= FEEDBACK_TIMEOUT_MS) {
+        if (missing || now - start_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS) {
             uint8_t failed = SendTargets(0);
             if (failed) TripFault(failed, now);
             return;
@@ -275,7 +272,7 @@ void ChassisMotorTask(void)
 {
     static uint32_t last_cycle_ms;
     uint32_t now = HAL_GetTick();
-    if (now - last_cycle_ms < CONTROL_PERIOD_MS)
+    if (now - last_cycle_ms < CHASSIS_CONTROL_PERIOD_MS)
         return;
     last_cycle_ms = now;
 

@@ -9,7 +9,7 @@
 | WHEEL_RL | 左后 | 0x003 / 0x013 | 3 / 0x143 |
 | WHEEL_RR | 右后 | 0x004 / 0x014 | 4 / 0x144 |
 
-`ChassisInit` 注册四个轮组。可从 `wheels[i].steer_motor` 查看 MIT 测量值和目标，从 `wheels[i].drive_motor` 查看轮毂测量值和目标速度。机械零位、安装方向和有符号传动比在 `wheel_config` 中配置。现有零位均为 0，方向与传动比均为 +1。MIT 量程在 `robot_def.h` 中配置，须与实际驱动参数相符。
+`ChassisInit` 注册四个轮组。可从 `wheels[i].steer_motor` 查看 MIT 测量值和目标，从 `wheels[i].drive_motor` 查看轮毂测量值和目标速度。各轮机械零位和 MIT 量程在 [chassis.h](chassis.h) 中配置，量程须与实际驱动参数相符。安装方向和有符号传动比在 `wheel_config` 中配置。
 
 `ChassisTask` 读取指令、处理底盘模式，并提交整条车体速度命令。`ChassisMotorTask` 在电机任务中每隔至少 5 ms 获取一次指令和反馈快照，调用 `steering.c` 做运动学解算，再发送本周期的四个舵向目标和一帧轮速广播。LK 应启用广播模式。启停使用 0x288，速度使用 0x281，各节点占两个字节，小端有符号，单位为 °/s。
 

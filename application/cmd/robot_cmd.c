@@ -9,6 +9,7 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
+#include "steering.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -51,7 +52,8 @@ BMI088_Data_t bmi088_data;
 
 static float SwerveStick(int value)
 {
-    if (value < -660 || value > 660 || (value > -20 && value < 20))
+    if (value < -660 || value > 660 ||
+        (value > -ROBOT_CMD_STICK_DEADBAND && value < ROBOT_CMD_STICK_DEADBAND))
         return 0;
     return value / 660.0f;
 }
@@ -83,8 +85,8 @@ static void SetChassisMode(void)
 
 void RobotCMDInit()
 {
-    rc_data = RemoteControlInit(&huart5);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    vision_recv_data = VisionInit(&huart9); // 视觉通信串口
+    rc_data = RemoteControlInit(ROBOT_CMD_REMOTE_UART);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+    vision_recv_data = VisionInit(ROBOT_CMD_VISION_UART); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
     gimbal_feed_sub = SubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
@@ -189,8 +191,10 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    chassis_cmd_send.vx = SW_VXY * (rc_data[TEMP].key[KEY_PRESS].w - rc_data[TEMP].key[KEY_PRESS].s);
-    chassis_cmd_send.vy = SW_VXY * (rc_data[TEMP].key[KEY_PRESS].a - rc_data[TEMP].key[KEY_PRESS].d);
+    chassis_cmd_send.vx = rc_data[TEMP].key[KEY_PRESS].w * ROBOT_CMD_KEY_SPEED
+                        - rc_data[TEMP].key[KEY_PRESS].s * ROBOT_CMD_KEY_SPEED;
+    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].s * ROBOT_CMD_KEY_SPEED
+                        - rc_data[TEMP].key[KEY_PRESS].d * ROBOT_CMD_KEY_SPEED;
 
     gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
     gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;

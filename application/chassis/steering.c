@@ -1,4 +1,5 @@
 #include "steering.h"
+#include "chassis.h"
 #include <math.h>
 
 #define PI_F 3.14159265358979323846f
@@ -12,7 +13,7 @@ uint8_t SwerveSolveWheel(const SwerveGeometry_s *wheel, float vx, float vy, floa
     target->speed_mps = 0;
     if (!isfinite(speed) || !isfinite(position_rad))
         return 0;
-    if (speed < 0.01f)
+    if (speed < CHASSIS_STEER_HOLD_MPS)
         return 1;
 
     float angle = (position_rad - wheel->zero_rad) / wheel->steer_ratio;
@@ -24,7 +25,7 @@ uint8_t SwerveSolveWheel(const SwerveGeometry_s *wheel, float vx, float vy, floa
     }
 
     float goal = position_rad + wheel->steer_ratio * error;
-    float limit = position_max_rad - 0.05f;
+    float limit = position_max_rad - CHASSIS_STEER_MARGIN_RAD;
     if (fabsf(goal) > limit) {
         error -= copysignf(PI_F, goal * wheel->steer_ratio);
         direction = -direction;

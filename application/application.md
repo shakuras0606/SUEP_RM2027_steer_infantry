@@ -4,8 +4,6 @@
 
 这是application层的说明。
 
-> todo: 是否有必要将所有电机等模块的初始化参数放到一个头文件？
-
 ## 使用说明
 
 在main函数中包含`robot.h`头文件，这是对整车的抽象。将`INStask`，`motortask`，`ledtask`，`monitortask`这四个task加入`freertos.c`中，创建对应的任务，设置合适的任务运行间隔；然后将`robottask`放入freertos.c中，同样以一定的频率运行。 在初始化实时系统之前，在`main()`中调用`RobotInit()`进行整车的初始化。
@@ -14,7 +12,7 @@
 
 若使用双板，则在`robot_def.h`中给对应的开发板设定宏定义，如底盘板使用`#define CHASSIS_BOARD`，云台板使用`#define GIMBAL_BOARD`；单个开发板控制整车，则定义`#define ONE_BOARD`。在每个应用中，都已经使用编译预处理指令完成条件编译，会自动根据设定的宏切换功能。使用双板的时候，目前板间通信通过CAN完成，因此两个开发板会挂载在一条总线上，在两个开发板对这条总线的其他使用CAN的设备进行配置时注意**不要发生ID冲突**，还要注意**防止负载过大**。
 
-**同样，在该文件中你需要修改一些关于机器人的参数**。比如底盘和云台对齐时yaw电机编码器的值，拨盘的单圈载弹量、底盘的轴距等等。
+编译期参数按模块维护。轴距和舵轮零位见 [chassis.h](chassis/chassis.h)，云台对齐编码器值见 [gimbal.h](gimbal/gimbal.h)，shoot 电机接线见 [shoot.h](shoot/shoot.h)，摇杆死区和键盘平移系数见 [robot_cmd.h](cmd/robot_cmd.h)。修改后需重新编译并烧录。
 
 
 

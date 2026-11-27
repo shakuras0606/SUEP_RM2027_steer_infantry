@@ -30,3 +30,6 @@ DMMotorInstance *DMMotorInit(CAN_Init_Config_s can, DMMotorLimits_s limits);
 uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled);
 /* 发送 MIT 位置目标，速度和前馈力矩为零。零增益用于启动探测。 */
 uint8_t DMMotorSendPosition(DMMotorInstance *motor, DMMotorPositionRef_s reference);
+/* 发送 MIT 速度目标(KP=0,仅靠 KD 阻尼跟踪 v_des)，用于拨弹轮连发/反转等速度场合。
+ * p_des 填当前反馈位置，因此需要先收到过一帧反馈(measure.valid)，否则按 0 位置发送。 */
+uint8_t DMMotorSendVelocity(DMMotorInstance *motor, float velocity_rad_s, float kd);

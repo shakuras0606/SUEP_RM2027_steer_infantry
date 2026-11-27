@@ -1,213 +1,222 @@
 #include "shoot.h"
-#include "robot_def.h"
 
 #include "dji_motor.h"
+#include "dmmotor.h"
+#include "robot_def.h"
 #include "message_center.h"
-#include "bsp_dwt.h"
 #include "general_def.h"
+#include "bsp_log.h"
 
-/* 对于双发射机构的机器人,将下面的数据封装成结构体即可,生成两份shoot应用实例 */
-static DJIMotorInstance *friction_l, *friction_r, *loader; // 拨盘电机
-// static servo_instance *lid; 需要增加弹舱盖
+static DJIMotorInstance *friction_l, *friction_r; // 左/右摩擦轮 (M3508 + C620)
+static DMMotorInstance *loader;                   // 拨弹轮 (DM4310, MIT模式)
 
-static Publisher_t *shoot_pub;
-static Shoot_Ctrl_Cmd_s shoot_cmd_recv; // 来自cmd的发射控制信息
-static Subscriber_t *shoot_sub;
-static Shoot_Upload_Data_s shoot_feedback_data; // 来自cmd的发射控制信息
+static Publisher_t *shoot_pub;                   // 发射应用消息发布者(发射反馈给cmd)
+static Subscriber_t *shoot_sub;                  // cmd控制消息订阅者
+static Shoot_Upload_Data_s shoot_feedback_data;  // 回传给cmd的发射状态信息
+static Shoot_Ctrl_Cmd_s shoot_cmd_recv;          // 来自cmd的控制信息
 
-// dwt定时,计算冷却用
-static float hibernate_time = 0, dead_time = 0;
+/* 拨弹轮MIT控制的内部状态 */
+static uint8_t loader_enabled = 0;            // 拨弹轮是否已使能,避免每个周期重复发送使能帧
+static loader_mode_e loader_last_mode = LOAD_STOP; // 上一次的拨弹模式,用于单发/三发的边沿触发
+static float loader_target_rad = 0.0f;        // 单发/三发/保持的位置目标,单位rad
+static float loader_position_ref = 0.0f;      // 最近一次有效的位置目标,反馈丢失时用作退化目标
+
+/* 将角度限幅到 MIT 位置量程内(周期为2*PMAX的缠绕),避免单发累加后越界 */
+static float LoaderWrapAngle(float angle)
+{
+    const float period = 2.0f * LOADER_PMAX;
+    while (angle > LOADER_PMAX)
+        angle -= period;
+    while (angle < -LOADER_PMAX)
+        angle += period;
+    return angle;
+}
+
+/* 拨弹轮当前的位置目标: 优先用反馈,反馈无效时用上一次目标 */
+static float LoaderCurrentPosition()
+{
+    if (loader->measure.valid)
+        loader_position_ref = loader->measure.position_rad;
+    return loader_position_ref;
+}
 
 void ShootInit()
 {
-    // 左摩擦轮
+    /* 摩擦轮: M3508 + C620, 一帧0x200报文可以控制4个电调,左右两个分别挂在ID1/ID2 */
     Motor_Init_Config_s friction_config = {
         .can_init_config = {
             .can_handle = SHOOT_MOTOR_CAN,
+            .tx_id = SHOOT_FRICTION_L_CAN_ID, // 会被下面的右摩擦轮共用,实际发送由dji_motor分组完成
         },
         .controller_param_init_config = {
+            /* 速度环输出直接作为电流指令(close_loop_type只开SPEED_LOOP),
+             * 满量程16384对应20A,M3508转速上限约8000rpm=48000deg/s,
+             * 下面的Kp/Ki是让摩擦轮能快速到达空载转速的初值,必须实测弹道后整定 */
             .speed_PID = {
-                .Kp = 0, // 20
-                .Ki = 0, // 1
+                .Kp = 20,
+                .Ki = 0.5,
                 .Kd = 0,
-                .Improve = PID_Integral_Limit,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 10000,
-                .MaxOut = 15000,
-            },
-            .current_PID = {
-                .Kp = 0, // 0.7
-                .Ki = 0, // 0.1
-                .Kd = 0,
-                .Improve = PID_Integral_Limit,
-                .IntegralLimit = 10000,
-                .MaxOut = 15000,
+                .MaxOut = 16384,
             },
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
             .speed_feedback_source = MOTOR_FEED,
-
             .outer_loop_type = SPEED_LOOP,
-            .close_loop_type = SPEED_LOOP | CURRENT_LOOP,
+            /* 电流环暂不启用(未标定电流环增益,直接开会导致输出为0),
+             * 速度环输出就是电调电流指令 */
+            .close_loop_type = SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
-        .motor_type = M3508};
-    friction_config.can_init_config.tx_id = SHOOT_FRICTION_L_CAN_ID;
+        .motor_type = M3508,
+    };
     friction_l = DJIMotorInit(&friction_config);
 
-    friction_config.can_init_config.tx_id = SHOOT_FRICTION_R_CAN_ID; // 右摩擦轮,改txid和方向就行
+    // 右侧摩擦轮与左侧共用一个C620控制帧,只需修改ID和反转标志
+    friction_config.can_init_config.tx_id = SHOOT_FRICTION_R_CAN_ID;
     friction_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     friction_r = DJIMotorInit(&friction_config);
 
-    // 拨盘电机
-    Motor_Init_Config_s loader_config = {
-        .can_init_config = {
-            .can_handle = SHOOT_MOTOR_CAN,
-            .tx_id = SHOOT_LOADER_CAN_ID,
-        },
-        .controller_param_init_config = {
-            .angle_PID = {
-                // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                .Kp = 0, // 10
-                .Ki = 0,
-                .Kd = 0,
-                .MaxOut = 200,
-            },
-            .speed_PID = {
-                .Kp = 0, // 10
-                .Ki = 0, // 1
-                .Kd = 0,
-                .Improve = PID_Integral_Limit,
-                .IntegralLimit = 5000,
-                .MaxOut = 5000,
-            },
-            .current_PID = {
-                .Kp = 0, // 0.7
-                .Ki = 0, // 0.1
-                .Kd = 0,
-                .Improve = PID_Integral_Limit,
-                .IntegralLimit = 5000,
-                .MaxOut = 5000,
-            },
-        },
-        .controller_setting_init_config = {
-            .angle_feedback_source = MOTOR_FEED, .speed_feedback_source = MOTOR_FEED,
-            .outer_loop_type = SPEED_LOOP, // 初始化成SPEED_LOOP,让拨盘停在原地,防止拨盘上电时乱转
-            .close_loop_type = CURRENT_LOOP | SPEED_LOOP,
-            .motor_reverse_flag = MOTOR_DIRECTION_NORMAL, // 注意方向设置为拨盘的拨出的击发方向
-        },
-        .motor_type = M2006 // 英雄使用m3508
+    /* 拨弹轮: DM4310, MIT模式。MIT控制帧=0x300+ESC_ID, 反馈帧=MST_ID,
+     * 量程必须与达妙调试助手中写入的 PMAX/VMAX/TMAX 完全一致 */
+    CAN_Init_Config_s loader_can_config = {
+        .can_handle = SHOOT_MOTOR_CAN,
+        .tx_id = SHOOT_LOADER_DM_CTRL_ID,
+        .rx_id = SHOOT_LOADER_DM_MST_ID,
     };
-    loader = DJIMotorInit(&loader_config);
+    DMMotorLimits_s loader_limits = {
+        .position_rad = LOADER_PMAX,
+        .velocity_rad_s = LOADER_VMAX,
+        .torque_nm = LOADER_TMAX,
+    };
+    loader = DMMotorInit(loader_can_config, loader_limits);
+    if (loader == NULL)
+        LOGERROR("[shoot] DM4310 loader init failed, check DM_MOTOR_COUNT and id conflict");
 
     shoot_pub = PubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
     shoot_sub = SubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
 }
 
-/* 机器人发射机构控制核心任务 */
 void ShootTask()
 {
-    // 从cmd获取控制数据
     SubGetMessage(shoot_sub, &shoot_cmd_recv);
 
-    // 对shoot mode等于SHOOT_STOP的情况特殊处理,直接停止所有电机(紧急停止)
+    /* ---------- 使能/失能: 只在状态切换时发送,避免总线被使能帧占满 ---------- */
     if (shoot_cmd_recv.shoot_mode == SHOOT_OFF)
     {
         DJIMotorStop(friction_l);
         DJIMotorStop(friction_r);
-        DJIMotorStop(loader);
+        if (loader != NULL && loader_enabled)
+        {
+            DMMotorSetEnabled(loader, 0);
+            loader_enabled = 0;
+        }
+        loader_last_mode = LOAD_STOP; // 重新使能后按STOP重新走边沿
     }
-    else // 恢复运行
+    else
     {
         DJIMotorEnable(friction_l);
         DJIMotorEnable(friction_r);
-        DJIMotorEnable(loader);
-    }
-
-    // 如果上一次触发单发或3发指令的时间加上不应期仍然大于当前时间(尚未休眠完毕),直接返回即可
-    // 单发模式主要提供给能量机关激活使用(以及英雄的射击大部分处于单发)
-    // if (hibernate_time + dead_time > DWT_GetTimeline_ms())
-    //     return;
-
-    // 若不在休眠状态,根据robotCMD传来的控制模式进行拨盘电机参考值设定和模式切换
-    switch (shoot_cmd_recv.load_mode)
-    {
-    // 停止拨盘
-    case LOAD_STOP:
-        DJIMotorOuterLoop(loader, SPEED_LOOP); // 切换到速度环
-        DJIMotorSetRef(loader, 0);             // 同时设定参考值为0,这样停止的速度最快
-        break;
-    // 单发模式,根据鼠标按下的时间,触发一次之后需要进入不响应输入的状态(否则按下的时间内可能多次进入,导致多次发射)
-    case LOAD_1_BULLET:                                                                     // 激活能量机关/干扰对方用,英雄用.
-        DJIMotorOuterLoop(loader, ANGLE_LOOP);                                              // 切换到角度环
-        DJIMotorSetRef(loader, loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE); // 控制量增加一发弹丸的角度
-        hibernate_time = DWT_GetTimeline_ms();                                              // 记录触发指令的时间
-        dead_time = 150;                                                                    // 完成1发弹丸发射的时间
-        break;
-    // 三连发,如果不需要后续可能删除
-    case LOAD_3_BULLET:
-        DJIMotorOuterLoop(loader, ANGLE_LOOP);                                                  // 切换到速度环
-        DJIMotorSetRef(loader, loader->measure.total_angle + 3 * ONE_BULLET_DELTA_ANGLE); // 增加3发
-        hibernate_time = DWT_GetTimeline_ms();                                                  // 记录触发指令的时间
-        dead_time = 300;                                                                        // 完成3发弹丸发射的时间
-        break;
-    // 连发模式,对速度闭环,射频后续修改为可变,目前固定为1Hz
-    case LOAD_BURSTFIRE:
-        DJIMotorOuterLoop(loader, SPEED_LOOP);
-        DJIMotorSetRef(loader, shoot_cmd_recv.shoot_rate * 360 * REDUCTION_RATIO_LOADER / 8);
-        // x颗/秒换算成速度: 已知一圈的载弹量,由此计算出1s需要转的角度,注意换算角速度(DJIMotor的速度单位是angle per second)
-        break;
-    // 拨盘反转,对速度闭环,后续增加卡弹检测(通过裁判系统剩余热量反馈和电机电流)
-    // 也有可能需要从switch-case中独立出来
-    case LOAD_REVERSE:
-        DJIMotorOuterLoop(loader, SPEED_LOOP);
-        // ...
-        break;
-    default:
-        while (1)
-            ; // 未知模式,停止运行,检查指针越界,内存溢出等问题
-    }
-
-    // 确定是否开启摩擦轮,后续可能修改为键鼠模式下始终开启摩擦轮(上场时建议一直开启)
-    if (shoot_cmd_recv.friction_mode == FRICTION_ON)
-    {
-        // 根据收到的弹速设置设定摩擦轮电机参考值,需实测后填入
-        switch (shoot_cmd_recv.bullet_speed)
+        if (loader != NULL && !loader_enabled)
         {
-        case SMALL_AMU_15:
-            DJIMotorSetRef(friction_l, 0);
-            DJIMotorSetRef(friction_r, 0);
-            break;
-        case SMALL_AMU_18:
-            DJIMotorSetRef(friction_l, 0);
-            DJIMotorSetRef(friction_r, 0);
-            break;
-        case SMALL_AMU_30:
-            DJIMotorSetRef(friction_l, 0);
-            DJIMotorSetRef(friction_r, 0);
-            break;
-        default: // 当前为了调试设定的默认值4000,因为还没有加入裁判系统无法读取弹速.
-            DJIMotorSetRef(friction_l, 30000);
-            DJIMotorSetRef(friction_r, 30000);
-            break;
+            DMMotorSetEnabled(loader, 1);
+            loader_enabled = 1;
+            loader_last_mode = LOAD_STOP;
         }
     }
-    else // 关闭摩擦轮
+
+    /* ---------- 拨弹轮 ---------- */
+    if (loader != NULL && shoot_cmd_recv.shoot_mode != SHOOT_OFF)
     {
-        DJIMotorSetRef(friction_l, 0);
-        DJIMotorSetRef(friction_r, 0);
+        switch (shoot_cmd_recv.load_mode)
+        {
+        case LOAD_STOP: // 停在当前位置,保持拨盘不因弹丸挤压而回退
+        {
+            loader_target_rad = LoaderCurrentPosition();
+            DMMotorSendPosition(loader, (DMMotorPositionRef_s){
+                                            .position_rad = loader_target_rad,
+                                            .kp = LOADER_POS_KP,
+                                            .kd = LOADER_POS_KD,
+                                        });
+            break;
+        }
+        case LOAD_1_BULLET: // 单发: 仅在模式刚切换时累加目标角度,之后保持
+        case LOAD_3_BULLET: // 三发
+        {
+            if (loader_last_mode != shoot_cmd_recv.load_mode)
+            {
+                const float bullets = (shoot_cmd_recv.load_mode == LOAD_1_BULLET) ? 1.0f : 3.0f;
+                loader_target_rad =
+                    LoaderWrapAngle(LoaderCurrentPosition() + bullets * ONE_BULLET_DELTA_ANGLE * DEGREE_2_RAD);
+            }
+            DMMotorSendPosition(loader, (DMMotorPositionRef_s){
+                                            .position_rad = loader_target_rad,
+                                            .kp = LOADER_POS_KP,
+                                            .kd = LOADER_POS_KD,
+                                        });
+            break;
+        }
+        case LOAD_BURSTFIRE: // 连发: MIT速度模式, kp=0, 靠kd阻尼跟踪拨盘转速
+            DMMotorSendVelocity(loader,
+                                shoot_cmd_recv.shoot_rate * ONE_BULLET_DELTA_ANGLE * DEGREE_2_RAD,
+                                LOADER_SPEED_KD);
+            break;
+        case LOAD_REVERSE: // 反转退弹
+            DMMotorSendVelocity(loader, -LOADER_REVERSE_SPEED, LOADER_SPEED_KD);
+            break;
+        default: // 非法模式,急停拨弹轮
+            LOGERROR("[shoot] invalid load_mode %d", shoot_cmd_recv.load_mode);
+            DMMotorSetEnabled(loader, 0);
+            loader_enabled = 0;
+            break;
+        }
+        loader_last_mode = shoot_cmd_recv.load_mode;
     }
 
-    // 开关弹舱盖
-    if (shoot_cmd_recv.lid_mode == LID_CLOSE)
+    /* ---------- 摩擦轮 ---------- */
+    if (shoot_cmd_recv.shoot_mode != SHOOT_OFF)
     {
-        //...
-    }
-    else if (shoot_cmd_recv.lid_mode == LID_OPEN)
-    {
-        //...
+        if (shoot_cmd_recv.friction_mode == FRICTION_ON)
+        {
+            float friction_speed = SHOOT_FRICTION_SPEED_DEFAULT;
+            switch (shoot_cmd_recv.bullet_speed)
+            {
+            case SMALL_AMU_15:
+                friction_speed = SHOOT_FRICTION_SPEED_15;
+                break;
+            case SMALL_AMU_18:
+                friction_speed = SHOOT_FRICTION_SPEED_18;
+                break;
+            case SMALL_AMU_30:
+                friction_speed = SHOOT_FRICTION_SPEED_30;
+                break;
+            default:
+                LOGWARNING("[shoot] unknown bullet speed %d, use default", shoot_cmd_recv.bullet_speed);
+                break;
+            }
+            DJIMotorSetRef(friction_l, friction_speed);
+            DJIMotorSetRef(friction_r, friction_speed);
+        }
+        else // 摩擦轮停转
+        {
+            DJIMotorSetRef(friction_l, 0);
+            DJIMotorSetRef(friction_r, 0);
+        }
     }
 
-    // 反馈数据,目前暂时没有要设定的反馈数据,后续可能增加应用离线监测以及卡弹反馈
+    // 图传/弹仓盖(预留)
+    switch (shoot_cmd_recv.lid_mode)
+    {
+    case LID_OPEN: // 打开弹仓盖
+        break;
+    case LID_CLOSE: // 关闭弹仓盖
+        break;
+    default:
+        break;
+    }
+
+    // 推送消息
     PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);
 }

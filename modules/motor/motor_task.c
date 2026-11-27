@@ -2,6 +2,7 @@
 #include "LK9025.h"
 #include "HT04.h"
 #include "dji_motor.h"
+#include "dm4310_ctrl4.h"
 #include "step_motor.h"
 #include "servo_motor.h"
 
@@ -14,6 +15,9 @@ void MotorControlTask()
 
     /* 如果有对应的电机则取消注释,可以加入条件编译或者register对应的idx判断是否注册了电机 */
     LKMotorControl();
+
+    /* 达妙DM4310一控四固件(电流环), 云台yaw/pitch的角度/速度环在此软件实现 */
+    DM4310Ctrl4Control();
 
     // legacy support
     // 由于ht04电机的反馈方式为接收到一帧消息后立刻回传,以此方式连续发送可能导致总线拥塞

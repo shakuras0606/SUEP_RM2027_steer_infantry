@@ -1,8 +1,9 @@
 #include "dmmotor.h"
+#include "motor_def.h"
 #include <math.h>
 #include <string.h>
 
-#define DM_MOTOR_COUNT 5u
+#define DM_MOTOR_COUNT 8u // 底盘4个转向电机 + 拨弹轮,预留余量
 
 static DMMotorInstance motors[DM_MOTOR_COUNT];
 static unsigned motor_count;
@@ -56,26 +57,72 @@ uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled)
     return CANTransmit(can, 1);
 }
 
-uint8_t DMMotorSendPosition(DMMotorInstance *motor, DMMotorPositionRef_s reference)
+/**
+ * @brief 按达妙 MIT 协议打包并发送一帧控制报文
+ *
+ * @param p_des  位置给定(rad),范围±PMAX
+ * @param v_des  速度给定(rad/s),范围±VMAX
+ * @param kp     位置增益,范围0~500
+ * @param kd     速度增益,范围0~5
+ * @param t_ff   前馈力矩(N·m),范围±TMAX
+ * @return uint8_t 1: 发送成功; 0: 参数非法或发送失败
+ *
+ * 12/16 位字段采用达妙官方 float_to_uint 的线性映射:
+ *   uint = (value - min) / (max - min) * (2^bits - 1),
+ * 因此零速度/零力矩编码为 2048(0x800)而不是0。字节打包顺序为
+ *   D0-D1: p(16bit) | D2: v高8位 | D3: v低4位+kp高4位 | D4: kp低8位
+ *   D5: kd高8位 | D6: kd低4位+t高4位 | D7: t低8位
+ */
+static uint8_t SendMITFrame(DMMotorInstance *motor, float p_des, float v_des, float kp, float kd, float t_ff)
 {
-    float limit = motor->limits.position_rad;
-    if (!isfinite(reference.position_rad) || fabsf(reference.position_rad) > limit ||
-        !(reference.kp >= 0.0f && reference.kp <= 500.0f) ||
-        !(reference.kd >= 0.0f && reference.kd <= 5.0f))
+    if (motor == NULL || motor->motor_can_instance == NULL)
         return 0;
 
-    motor->reference = reference;
-    uint16_t p = (uint16_t)lroundf((reference.position_rad / limit + 1.0f) * 32767.5f);
-    uint16_t kp = (uint16_t)lroundf(reference.kp * 4095.0f / 500.0f);
-    uint16_t kd = (uint16_t)lroundf(reference.kd * 4095.0f / 5.0f);
+    const float p_limit = motor->limits.position_rad;
+    const float v_limit = motor->limits.velocity_rad_s;
+    const float t_limit = motor->limits.torque_nm;
+
+    if (!isfinite(p_des) || !isfinite(v_des) || !isfinite(kp) || !isfinite(kd) || !isfinite(t_ff))
+        return 0;
+    if (fabsf(p_des) > p_limit || fabsf(v_des) > v_limit || fabsf(t_ff) > t_limit)
+        return 0;
+    if (!(kp >= 0.0f && kp <= 500.0f) || !(kd >= 0.0f && kd <= 5.0f))
+        return 0;
+
+    uint16_t p = (uint16_t)lroundf((p_des / p_limit + 1.0f) * 32767.5f);
+    uint16_t v = (uint16_t)lroundf((v_des / v_limit + 1.0f) * 2047.5f);
+    uint16_t kp_uint = (uint16_t)lroundf(kp * 4095.0f / 500.0f);
+    uint16_t kd_uint = (uint16_t)lroundf(kd * 4095.0f / 5.0f);
+    uint16_t t = (uint16_t)lroundf((t_ff / t_limit + 1.0f) * 2047.5f);
+
     uint8_t *data = motor->motor_can_instance->tx_buff;
-    data[0] = p >> 8;
+    data[0] = (uint8_t)(p >> 8);
     data[1] = (uint8_t)p;
-    data[2] = 0x80;                      /* 目标速度为零，编码 0x800 */
-    data[3] = kp >> 8;
-    data[4] = (uint8_t)kp;
-    data[5] = kd >> 4;
-    data[6] = (uint8_t)((kd << 4) | 0x08u);
-    data[7] = 0;                         /* 前馈力矩为零，编码 0x800 */
+    data[2] = (uint8_t)(v >> 4);
+    data[3] = (uint8_t)(((v & 0x0Fu) << 4) | (kp_uint >> 8));
+    data[4] = (uint8_t)kp_uint;
+    data[5] = (uint8_t)(kd_uint >> 4);
+    data[6] = (uint8_t)(((kd_uint & 0x0Fu) << 4) | (t >> 8));
+    data[7] = (uint8_t)t;
     return CANTransmit(motor->motor_can_instance, 1);
+}
+
+uint8_t DMMotorSendPosition(DMMotorInstance *motor, DMMotorPositionRef_s reference)
+{
+    if (motor == NULL)
+        return 0;
+    motor->reference = reference;
+    return SendMITFrame(motor, reference.position_rad, 0.0f, reference.kp, reference.kd, 0.0f);
+}
+
+uint8_t DMMotorSendVelocity(DMMotorInstance *motor, float velocity_rad_s, float kd)
+{
+    if (motor == NULL)
+        return 0;
+
+    /* p_des 填当前反馈位置,避免 MIT 内部位置项在 KP=0 时的数值无意义 */
+    float position = motor->measure.valid ? motor->measure.position_rad : 0.0f;
+    LIMIT_MIN_MAX(position, -motor->limits.position_rad, motor->limits.position_rad);
+    motor->reference = (DMMotorPositionRef_s){.position_rad = position, .kp = 0.0f, .kd = kd};
+    return SendMITFrame(motor, position, velocity_rad_s, 0.0f, kd, 0.0f);
 }

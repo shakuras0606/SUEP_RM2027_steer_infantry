@@ -27,11 +27,15 @@ typedef struct {
 } WheelConfig_s;
 
 static const WheelConfig_s wheel_config[WHEEL_COUNT] = {
-    /* MIT CAN_ID / MST_ID，LK 节点号，轮心 x/y，安装零位，有符号舵传动比，轮向 */
-    [WHEEL_FL] = {0x001, 0x011, 1, { HALF_X_M,  HALF_Y_M, CHASSIS_FL_ZERO_RAD, 1, 1}},
-    [WHEEL_FR] = {0x002, 0x012, 2, { HALF_X_M, -HALF_Y_M, CHASSIS_FR_ZERO_RAD, 1, 1}},
-    [WHEEL_RL] = {0x003, 0x013, 3, {-HALF_X_M,  HALF_Y_M, CHASSIS_RL_ZERO_RAD, 1, 1}},
-    [WHEEL_RR] = {0x004, 0x014, 4, {-HALF_X_M, -HALF_Y_M, CHASSIS_RR_ZERO_RAD, 1, 1}},
+    /* CAN_ID / MST_ID / LK节点号 见 chassis.h, 轮心 x/y, 安装零位, 有符号舵传动比, 轮向 */
+    [WHEEL_FL] = {CHASSIS_STEER_FL_CAN_ID, CHASSIS_STEER_FL_MST_ID, CHASSIS_DRIVE_FL_NODE,
+                  { HALF_X_M,  HALF_Y_M, CHASSIS_FL_ZERO_RAD, 1, 1}},
+    [WHEEL_FR] = {CHASSIS_STEER_FR_CAN_ID, CHASSIS_STEER_FR_MST_ID, CHASSIS_DRIVE_FR_NODE,
+                  { HALF_X_M, -HALF_Y_M, CHASSIS_FR_ZERO_RAD, 1, 1}},
+    [WHEEL_RL] = {CHASSIS_STEER_RL_CAN_ID, CHASSIS_STEER_RL_MST_ID, CHASSIS_DRIVE_RL_NODE,
+                  {-HALF_X_M,  HALF_Y_M, CHASSIS_RL_ZERO_RAD, 1, 1}},
+    [WHEEL_RR] = {CHASSIS_STEER_RR_CAN_ID, CHASSIS_STEER_RR_MST_ID, CHASSIS_DRIVE_RR_NODE,
+                  {-HALF_X_M, -HALF_Y_M, CHASSIS_RR_ZERO_RAD, 1, 1}},
 };
 
 typedef struct {
@@ -69,10 +73,10 @@ void ChassisInit(void)
 {
     for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
         const WheelConfig_s *cfg = &wheel_config[i];
-        CAN_Init_Config_s can = {.can_handle = &hcan2, .tx_id = cfg->steer_tx, .rx_id = cfg->steer_rx};
+        CAN_Init_Config_s can = {.can_handle = CHASSIS_STEER_CAN, .tx_id = cfg->steer_tx, .rx_id = cfg->steer_rx};
         DMMotorLimits_s limits = {SW_PMAX, SW_VMAX, SW_TMAX};
         wheels[i].steer_motor = DMMotorInit(can, limits);
-        wheels[i].drive_motor = LK7015MotorInit(&drive_group, &hcan1, cfg->drive_node);
+        wheels[i].drive_motor = LK7015MotorInit(&drive_group, CHASSIS_DRIVE_CAN, cfg->drive_node);
         if (!wheels[i].steer_motor || !wheels[i].drive_motor)
             init_fault_mask |= 1u << i;
     }

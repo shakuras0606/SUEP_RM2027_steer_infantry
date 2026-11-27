@@ -1,6 +1,39 @@
 #ifndef CHASSIS_H
 #define CHASSIS_H
 
+/* ==================== 电机 CAN 配置 ====================
+ * 舵电机: 达妙 DM4310, MIT 控制模式, 挂载 CAN2
+ *   - 控制帧 = CAN_ID(ESC_ID), 反馈帧 = MST_ID
+ *   - 反馈报文 D[0] 低4位为电机ID, 必须与 CAN_ID 的低4位一致, 否则反馈被整帧丢弃
+ * 驱动电机: 领控 LK7015, 挂载 CAN1, 反馈帧 = 0x140 + 节点号(节点号必须 1~4)
+ * 电机侧的 CAN_ID/MST_ID/节点号需先用达妙调试助手、LK 上位机配置好, 本工程不负责写电机参数 */
+#define CHASSIS_STEER_CAN (&hcan2)
+#define CHASSIS_DRIVE_CAN (&hcan1)
+
+#define CHASSIS_STEER_FL_CAN_ID 0x001u // 左前 舵电机 MIT CAN_ID
+#define CHASSIS_STEER_FL_MST_ID 0x011u // 左前 舵电机反馈 MST_ID
+#define CHASSIS_DRIVE_FL_NODE   1u     // 左前 LK7015 节点号
+
+#define CHASSIS_STEER_FR_CAN_ID 0x002u // 右前 舵电机 MIT CAN_ID
+#define CHASSIS_STEER_FR_MST_ID 0x012u // 右前 舵电机反馈 MST_ID
+#define CHASSIS_DRIVE_FR_NODE   2u     // 右前 LK7015 节点号
+
+#define CHASSIS_STEER_RL_CAN_ID 0x003u // 左后 舵电机 MIT CAN_ID
+#define CHASSIS_STEER_RL_MST_ID 0x013u // 左后 舵电机反馈 MST_ID
+#define CHASSIS_DRIVE_RL_NODE   3u     // 左后 LK7015 节点号
+
+#define CHASSIS_STEER_RR_CAN_ID 0x004u // 右后 舵电机 MIT CAN_ID
+#define CHASSIS_STEER_RR_MST_ID 0x014u // 右后 舵电机反馈 MST_ID
+#define CHASSIS_DRIVE_RR_NODE   4u     // 右后 LK7015 节点号
+
+/* 编译期校验: MST_ID 低4位必须等于 CAN_ID 低4位, 改ID时漏改一侧会在这里直接报错 */
+#if (((CHASSIS_STEER_FL_MST_ID ^ CHASSIS_STEER_FL_CAN_ID) | \
+      (CHASSIS_STEER_FR_MST_ID ^ CHASSIS_STEER_FR_CAN_ID) | \
+      (CHASSIS_STEER_RL_MST_ID ^ CHASSIS_STEER_RL_CAN_ID) | \
+      (CHASSIS_STEER_RR_MST_ID ^ CHASSIS_STEER_RR_CAN_ID)) & 0x0fu)
+#error "CHASSIS_STEER_x_MST_ID 的低4位必须等于对应 CHASSIS_STEER_x_CAN_ID 的低4位"
+#endif
+
 /* 底盘速度、跟随控制和舵电机 MIT 参数 */
 #define SW_VXY       0.40f   // 遥控平移上限，m/s
 #define SW_WZ        1.00f   // 跟随角速度上限，rad/s

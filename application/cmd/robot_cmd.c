@@ -63,24 +63,46 @@ static float SwerveStick(int value)
  *        遥控离线/急停/机器人未就绪时强制无力,避免沿用上一周期的模式
  *        旋转速度(wz)由底盘按当前模式生成,这里只给出模式和前进/横移速度
  */
-static void SetChassisMode(void)
+static void SetChassisMode(const RC_ctrl_t *rc, uint8_t online)
 {
-    uint32_t mask = __get_PRIMASK();
-    __disable_irq();
-    RC_ctrl_t rc = rc_data[TEMP];
-    uint8_t online = RemoteControlIsOnline();
-    __set_PRIMASK(mask);
-
-    if (!online || !switch_is_down(rc.rc.switch_left) ||
-        rc.rc.switch_right == 0 || rc.rc.dial > 300 ||
-        robot_state != ROBOT_READY || switch_is_down(rc.rc.switch_right)) {
+    if (!online || !switch_is_down(rc->rc.switch_left) ||
+        rc->rc.switch_right == 0 || rc->rc.dial > 300 ||
+        robot_state != ROBOT_READY || switch_is_down(rc->rc.switch_right)) {
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.vx = chassis_cmd_send.vy = chassis_cmd_send.wz = 0;
-    } else if (switch_is_mid(rc.rc.switch_right)) {
+    } else if (switch_is_mid(rc->rc.switch_right)) {
         chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
-    } else if (switch_is_up(rc.rc.switch_right)) {
+    } else if (switch_is_up(rc->rc.switch_right)) {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
     }
+}
+
+/* 返回 1 时本拍摇杆用于校准。过长按门限后可松杆，离开双下档或掉线会撤销请求。 */
+static uint8_t UpdateSteerZeroGesture(const RC_ctrl_t *rc, uint8_t online, uint32_t now)
+{
+    static uint32_t hold_start;
+    static uint8_t holding, triggered, sequence;
+    uint8_t inward = rc->rc.rocker_l_ >= ROBOT_CMD_ZERO_STICK && rc->rc.rocker_l1 <= -ROBOT_CMD_ZERO_STICK &&
+                     rc->rc.rocker_r_ <= -ROBOT_CMD_ZERO_STICK && rc->rc.rocker_r1 <= -ROBOT_CMD_ZERO_STICK;
+
+    if (online && !inward)
+        triggered = 0;
+    chassis_cmd_send.steer_zero_permitted = online && robot_state == ROBOT_READY && rc->rc.dial <= 300 &&
+                                            switch_is_down(rc->rc.switch_left) && switch_is_down(rc->rc.switch_right);
+    if (!chassis_cmd_send.steer_zero_permitted || !inward) {
+        chassis_cmd_send.steer_zero_request = 0;
+        holding = 0;
+        return 0;
+    }
+    if (!holding) {
+        holding = 1;
+        hold_start = now;
+    } else if (!triggered && now - hold_start >= ROBOT_CMD_ZERO_HOLD_MS) {
+        triggered = 1;
+        if (++sequence == 0) ++sequence; // 0 用于撤销
+        chassis_cmd_send.steer_zero_request = sequence;
+    }
+    return 1;
 }
 
 void RobotCMDInit()
@@ -145,7 +167,7 @@ static void CalcOffsetAngle()
  * @brief 控制输入为遥控器(调试时)的模式和控制量设置
  *
  */
-static void RemoteControlSet()
+static void RemoteControlSet(const RC_ctrl_t *rc, uint8_t zero_gesture)
 {
     // 底盘模式由 SetChassisMode() 按右侧开关统一设置
     // 云台使用陀螺仪反馈,与小陀螺/跟随模式配合
@@ -158,10 +180,10 @@ static void RemoteControlSet()
         // ...
     }
     // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
+    if (!zero_gesture && (switch_is_down(rc->rc.switch_left) || vision_recv_data->target_state == NO_TARGET))
     { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.005f * (float)rc_data[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_data[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw += 0.005f * (float)rc->rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.001f * (float)rc->rc.rocker_l1;
     }
     // 云台软件限位
 
@@ -278,10 +300,10 @@ static void MouseKeySet()
  * @todo   后续修改为遥控器离线则电机停止(关闭遥控器急停),通过给遥控器模块添加daemon实现
  *
  */
-static void EmergencyHandler()
+static void EmergencyHandler(const RC_ctrl_t *rc)
 {
     // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_data[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    if (rc->rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
     {
         robot_state = ROBOT_STOP;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
@@ -292,7 +314,7 @@ static void EmergencyHandler()
         LOGERROR("[CMD] emergency stop!");
     }
     // 拨轮回中且右侧开关回到[下](无力档)才解除急停,避免从急停直接进入行驶档
-    if (switch_is_down(rc_data[TEMP].rc.switch_right) && rc_data[TEMP].rc.dial <= 300)
+    if (switch_is_down(rc->rc.switch_right) && rc->rc.dial <= 300)
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -319,13 +341,19 @@ void RobotCMDTask()
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
     // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
-        RemoteControlSet();
-    else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    RC_ctrl_t rc = rc_data[TEMP];
+    uint8_t online = RemoteControlIsOnline();
+    __set_PRIMASK(mask);
+    uint8_t zero_gesture = UpdateSteerZeroGesture(&rc, online, HAL_GetTick());
+    if (switch_is_down(rc.rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
+        RemoteControlSet(&rc, zero_gesture);
+    else if (switch_is_up(rc.rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
         MouseKeySet();
 
-    EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
-    SetChassisMode();   // 右侧开关选择底盘模式
+    EmergencyHandler(&rc); // 处理模块离线和遥控器急停等紧急情况
+    SetChassisMode(&rc, online); // 右侧开关选择底盘模式
 
     // 设置视觉发送数据,还需增加加速度和角速度数据
     // VisionSetFlag(chassis_fetch_data.enemy_color,,chassis_fetch_data.bullet_speed)

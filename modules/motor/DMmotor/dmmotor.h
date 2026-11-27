@@ -28,6 +28,8 @@ typedef struct {
 
 DMMotorInstance *DMMotorInit(CAN_Init_Config_s can, DMMotorLimits_s limits);
 uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled);
+/* 仅用于已确认失能的电机。返回 1 表示设零帧已进入 CAN 发送队列。 */
+uint8_t DMMotorSaveZero(DMMotorInstance *motor);
 /* 发送 MIT 位置目标，速度和前馈力矩为零。零增益用于启动探测。 */
 uint8_t DMMotorSendPosition(DMMotorInstance *motor, DMMotorPositionRef_s reference);
 /* 发送 MIT 速度目标(KP=0,仅靠 KD 阻尼跟踪 v_des)，用于拨弹轮连发/反转等速度场合。

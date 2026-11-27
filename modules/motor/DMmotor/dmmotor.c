@@ -47,14 +47,27 @@ DMMotorInstance *DMMotorInit(CAN_Init_Config_s can, DMMotorLimits_s limits)
     return motor;
 }
 
-uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled)
+static uint8_t SendSpecialFrame(DMMotorInstance *motor, uint8_t command)
 {
     CANInstance *can = motor->motor_can_instance;
     memset(can->tx_buff, 0xff, 7);
-    can->tx_buff[7] = enabled ? 0xfc : 0xfd;
+    can->tx_buff[7] = command;
+    return CANTransmit(can, 1);
+}
+
+uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled)
+{
     motor->enable_requested = enabled;
     motor->reference = (DMMotorPositionRef_s){0};
-    return CANTransmit(can, 1);
+    return SendSpecialFrame(motor, enabled ? 0xfc : 0xfd);
+}
+
+uint8_t DMMotorSaveZero(DMMotorInstance *motor)
+{
+    if (!motor || !motor->motor_can_instance || motor->enable_requested ||
+        !motor->measure.valid || motor->measure.state != 0)
+        return 0;
+    return SendSpecialFrame(motor, 0xfe);
 }
 
 /**

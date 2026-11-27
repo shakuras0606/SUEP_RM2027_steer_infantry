@@ -1,10 +1,10 @@
 #include "bsp_pwm.h"
 #include "buzzer.h"
-#include "bsp_dwt.h"
+#include <stdlib.h>
 #include "string.h"
 
 static PWMInstance *buzzer;
-// static uint8_t idx;
+static volatile BuzzerResult_e pending_result;
 static BuzzzerInstance *buzzer_list[BUZZER_DEVICE_CNT] = {0};
 
 /**
@@ -24,7 +24,7 @@ void BuzzerInit()
 
 BuzzzerInstance *BuzzerRegister(Buzzer_config_s *config)
 {
-    if (config->alarm_level > BUZZER_DEVICE_CNT) // 超过最大实例数,考虑增加或查看是否有内存泄漏
+    if (config->alarm_level >= BUZZER_DEVICE_CNT) // alarm_level 同时是数组下标
         while (1)
             ;
     BuzzzerInstance *buzzer_temp = (BuzzzerInstance *)malloc(sizeof(BuzzzerInstance));
@@ -44,50 +44,46 @@ void AlarmSetStatus(BuzzzerInstance *buzzer, AlarmState_e state)
     buzzer->alarm_state = state;
 }
 
+void BuzzerPlayResult(BuzzerResult_e result)
+{
+    pending_result = result;
+}
+
 void BuzzerTask()
 {
-    BuzzzerInstance *buzz;
+    static const uint16_t alarm_freq[] = {DoFreq, ReFreq, MiFreq, FaFreq, SoFreq, LaFreq, SiFreq};
+    static BuzzerResult_e playing;
+    static uint32_t started_ms;
     for (size_t i = 0; i < BUZZER_DEVICE_CNT; ++i)
     {
-        buzz = buzzer_list[i];
-        if (buzz->alarm_level > ALARM_LEVEL_LOW)
-        {
-            continue;
-        }
-        if (buzz->alarm_state == ALARM_OFF)
-        {
-            PWMSetDutyRatio(buzzer, 0);
-        }
-        else
-        {
+        BuzzzerInstance *buzz = buzzer_list[i];
+        if (buzz && buzz->alarm_state == ALARM_ON) {
+            if ((unsigned)buzz->octave < sizeof(alarm_freq) / sizeof(alarm_freq[0]))
+                PWMSetPeriod(buzzer, 1.0f / alarm_freq[buzz->octave]);
             PWMSetDutyRatio(buzzer, buzz->loudness);
-            switch (buzz->octave)
-            {
-            case OCTAVE_1:
-                PWMSetPeriod(buzzer, (float)1 / DoFreq);
-                break;
-            case OCTAVE_2:
-                PWMSetPeriod(buzzer, (float)1 / ReFreq);
-                break;
-            case OCTAVE_3:
-                PWMSetPeriod(buzzer, (float)1 / MiFreq);
-                break;
-            case OCTAVE_4:
-                PWMSetPeriod(buzzer, (float)1 / FaFreq);
-                break;
-            case OCTAVE_5:
-                PWMSetPeriod(buzzer, (float)1 / SoFreq);
-                break;
-            case OCTAVE_6:
-                PWMSetPeriod(buzzer, (float)1 / LaFreq);
-                break;
-            case OCTAVE_7:
-                PWMSetPeriod(buzzer, (float)1 / SiFreq);
-                break;
-            default:
-                break;
-            }
-            break;
+            return;
         }
+    }
+
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    BuzzerResult_e next = pending_result;
+    pending_result = BUZZER_RESULT_NONE;
+    __set_PRIMASK(mask);
+    uint32_t now = HAL_GetTick();
+    if (next != BUZZER_RESULT_NONE) {
+        playing = next;
+        started_ms = now;
+    }
+    uint32_t elapsed = now - started_ms;
+    if (playing == BUZZER_RESULT_SUCCESS && elapsed < 280u) {
+        PWMSetPeriod(buzzer, 1.0f / SiFreq);
+        PWMSetDutyRatio(buzzer, elapsed < 100u || elapsed >= 180u ? 0.5f : 0.0f);
+    } else if (playing == BUZZER_RESULT_FAILURE && elapsed < 420u) {
+        PWMSetPeriod(buzzer, 1.0f / DoFreq);
+        PWMSetDutyRatio(buzzer, 0.5f);
+    } else {
+        playing = BUZZER_RESULT_NONE;
+        PWMSetDutyRatio(buzzer, 0);
     }
 }

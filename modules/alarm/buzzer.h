@@ -55,6 +55,11 @@ typedef struct
 
 void BuzzerInit();
 void BuzzerTask();
+typedef enum {
+    BUZZER_RESULT_NONE, BUZZER_RESULT_SUCCESS, BUZZER_RESULT_FAILURE
+} BuzzerResult_e;
+/* 投递一次提示音，由 10 ms 蜂鸣器任务播放。 */
+void BuzzerPlayResult(BuzzerResult_e result);
 BuzzzerInstance *BuzzerRegister(Buzzer_config_s *config);
 void AlarmSetStatus(BuzzzerInstance *buzzer, AlarmState_e state);
 #endif // !BUZZER_H

@@ -130,6 +130,8 @@ typedef struct
     float offset_angle; // 底盘和归中位置的夹角
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
+    uint8_t steer_zero_permitted; // 在线、双下档、未急停；松开摇杆后可继续已开始的校准
+    uint8_t steer_zero_request;   // 长按达标时携带非零序号，松杆清零
     // UI部分
     //  ...
 
@@ -177,6 +179,9 @@ typedef struct
     uint8_t steer_online_mask;
     uint8_t drive_online_mask;
     uint8_t fault_wheel_mask;
+    uint8_t steer_zero_state;          // SteerCalibrationPhase_e
+    uint8_t steer_zero_confirmed_mask; // 本次已收到零位反馈的舵电机
+    uint8_t steer_zero_failed_mask;    // 故障或取消时未确认的轮位
 } Chassis_Upload_Data_s;
 
 

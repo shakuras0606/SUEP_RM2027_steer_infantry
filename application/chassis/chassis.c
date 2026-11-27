@@ -1,6 +1,8 @@
 #include "chassis.h"
 #include "robot_def.h"
 #include "steering.h"
+#include "steer_calibration.h"
+#include "buzzer.h"
 #include "dmmotor.h"
 #include "lk7015_motor.h"
 #include "message_center.h"
@@ -46,12 +48,13 @@ typedef struct {
 typedef struct {
     float vx, vy, wz;
     uint32_t updated_ms;
-    uint8_t enabled;
+    uint8_t enabled, steer_zero_permitted, steer_zero_request;
 } MotionCommand_s;
 
 typedef struct {
     float position_rad[WHEEL_COUNT];
-    uint8_t steer_online, drive_online, steer_enabled, steer_fault;
+    uint32_t steer_updated_ms[WHEEL_COUNT];
+    uint8_t steer_online, drive_online, steer_enabled, steer_disabled, steer_fault;
 } WheelFeedback_s;
 
 static SwerveWheelInstance wheels[WHEEL_COUNT];
@@ -61,11 +64,13 @@ static Referee_Interactive_info_t ui;
 /* 机器人任务提交整条命令，并读取电机任务上次发布的诊断快照。 */
 static volatile MotionCommand_s command;
 static volatile uint8_t stop_requested;
+static volatile uint8_t steer_zero_revoked;
 static volatile Chassis_Upload_Data_s published_feedback;
 
 /* 下列状态（含上一有效舵角）均由电机任务持有。 */
 static SwerveTarget_s targets[WHEEL_COUNT];
 static SwervePhase_e phase;
+static SteerCalibration_s calibration;
 static uint8_t fault_mask, init_fault_mask, stop_pending = 1;
 static uint32_t start_ms, last_stop_ms;
 
@@ -100,11 +105,16 @@ void ChassisTask(void)
 {
     Chassis_Ctrl_Cmd_s cmd = {0};
 #ifdef CHASSIS_BOARD
+    static uint32_t last_board_cmd_ms;
     if (CANCommIsOnline(board_link)) {
         uint32_t mask = __get_PRIMASK();
         __disable_irq();
+        if (board_link->update_flag)
+            last_board_cmd_ms = HAL_GetTick();
         cmd = *(Chassis_Ctrl_Cmd_s *)CANCommGet(board_link);
         __set_PRIMASK(mask);
+        if (HAL_GetTick() - last_board_cmd_ms > CHASSIS_FEEDBACK_TIMEOUT_MS)
+            cmd.steer_zero_permitted = 0;
     }
 #else
     SubGetMessage(cmd_sub, &cmd);
@@ -112,6 +122,11 @@ void ChassisTask(void)
 
     MotionCommand_s next = {.vx = cmd.vx, .vy = cmd.vy, .wz = cmd.wz, .enabled = 1};
     switch (cmd.chassis_mode) {
+    case CHASSIS_ZERO_FORCE:
+        next.enabled = 0;
+        next.steer_zero_permitted = cmd.steer_zero_permitted;
+        next.steer_zero_request = cmd.steer_zero_request;
+        break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
         next.wz = -SW_FOLLOW_KP * cmd.offset_angle;
         if (next.wz > SW_WZ) next.wz = SW_WZ;
@@ -129,6 +144,12 @@ void ChassisTask(void)
     next.updated_ms = HAL_GetTick();
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
+    if (!next.steer_zero_permitted && command.steer_zero_permitted)
+        steer_zero_revoked = 1;
+    if (next.steer_zero_permitted && !next.steer_zero_request)
+        next.steer_zero_request = command.steer_zero_request; // 松杆时保留电机任务尚未取走的请求
+    if (!next.steer_zero_permitted)
+        next.steer_zero_request = 0;
     command = next;
     if (!next.enabled)
         stop_requested = 1;   /* 即使下一条命令先到，也要执行这次停机 */
@@ -151,8 +172,10 @@ static WheelFeedback_s ReadWheels(uint32_t now)
         const volatile LK7015Measure_s *lk = &wheels[i].drive_motor->measure;
         uint8_t bit = 1u << i;
         result.position_rad[i] = dm->position_rad;
+        result.steer_updated_ms[i] = dm->updated_ms;
         if (dm->valid && now - dm->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS) {
             result.steer_online |= bit;
+            if (dm->state == 0) result.steer_disabled |= bit;
             if (dm->state == 1) result.steer_enabled |= bit;
             if (dm->state >= 8) result.steer_fault |= bit;
         }
@@ -272,6 +295,33 @@ static void UpdateWheels(MotionCommand_s motion, uint8_t stop, const WheelFeedba
     if (failed) TripFault(failed, now);
 }
 
+/* 等待停机帧入队期间，命令和电机反馈都可能更新。设零前重新取快照。 */
+static void UpdateSteerCalibration(const WheelFeedback_s *f, const MotionCommand_s *motion, uint32_t now)
+{
+    SteerCalibrationPhase_e previous = calibration.phase;
+    uint8_t disabled = phase == SWERVE_OFF && !stop_pending ? f->steer_disabled : 0;
+    uint8_t permitted = motion->steer_zero_permitted && now - motion->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS;
+    WheelIndex_e wheel = SteerCalibrationStep(&calibration, permitted, motion->steer_zero_request, disabled,
+                                              f->position_rad, f->steer_updated_ms, now);
+    if (wheel != WHEEL_COUNT) {
+        uint32_t mask = __get_PRIMASK();
+        __disable_irq();
+        now = HAL_GetTick();
+        uint8_t allowed = !steer_zero_revoked && command.steer_zero_permitted &&
+                          now - command.updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS &&
+                          ReadWheels(now).steer_disabled == ALL_WHEELS;
+        __set_PRIMASK(mask);
+        uint8_t queued = allowed && DMMotorSaveZero(wheels[wheel].steer_motor);
+        SteerCalibrationSent(&calibration, queued, HAL_GetTick());
+    }
+    if (calibration.phase != previous) {
+        if (calibration.phase == STEER_ZERO_SUCCESS)
+            BuzzerPlayResult(BUZZER_RESULT_SUCCESS);
+        else if (calibration.phase == STEER_ZERO_FAILED)
+            BuzzerPlayResult(BUZZER_RESULT_FAILURE);
+    }
+}
+
 void ChassisMotorTask(void)
 {
     static uint32_t last_cycle_ms;
@@ -283,6 +333,10 @@ void ChassisMotorTask(void)
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     MotionCommand_s motion = command;
+    if (steer_zero_revoked)
+        motion.steer_zero_permitted = 0;
+    steer_zero_revoked = 0;
+    command.steer_zero_request = 0;
     uint8_t stop = stop_requested;
     stop_requested = 0;
     now = HAL_GetTick();
@@ -291,6 +345,8 @@ void ChassisMotorTask(void)
         f = ReadWheels(now);
     __set_PRIMASK(mask);
 
+    if (calibration.phase != STEER_ZERO_IDLE && calibration.phase != STEER_ZERO_SUCCESS)
+        motion.enabled = 0; // 校准中或失败后保持停机，完整重校成功才允许启动
     if (init_fault_mask) {
         phase = SWERVE_FAULT;
         fault_mask = init_fault_mask;
@@ -298,11 +354,16 @@ void ChassisMotorTask(void)
         UpdateWheels(motion, stop, &f, now);
     }
 
+    UpdateSteerCalibration(&f, &motion, now);
+
     mask = __get_PRIMASK();
     __disable_irq();
     published_feedback.swerve_phase = phase;
     published_feedback.steer_online_mask = f.steer_online;
     published_feedback.drive_online_mask = f.drive_online;
     published_feedback.fault_wheel_mask = fault_mask;
+    published_feedback.steer_zero_state = calibration.phase;
+    published_feedback.steer_zero_confirmed_mask = calibration.confirmed_mask;
+    published_feedback.steer_zero_failed_mask = calibration.failed_mask;
     __set_PRIMASK(mask);
 }

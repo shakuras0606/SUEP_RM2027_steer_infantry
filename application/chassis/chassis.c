@@ -29,15 +29,16 @@ typedef struct {
 } WheelConfig_s;
 
 static const WheelConfig_s wheel_config[WHEEL_COUNT] = {
-    /* CAN_ID / MST_ID / LK节点号 见 chassis.h, 轮心 x/y, 安装零位, 有符号舵传动比, 轮向 */
+    /* 按下标顺序(顺时针 FL/FR/RR/RL)排列, CAN_ID / MST_ID / LK节点号 / 极性 见 chassis.h
+     * 其余字段: 轮心 x/y, 安装零位, 有符号舵传动比, 轮向 */
     [WHEEL_FL] = {CHASSIS_STEER_FL_CAN_ID, CHASSIS_STEER_FL_MST_ID, CHASSIS_DRIVE_FL_NODE,
-                  { HALF_X_M,  HALF_Y_M, CHASSIS_FL_ZERO_RAD, 1, 1}},
+                  { HALF_X_M,  HALF_Y_M, CHASSIS_FL_ZERO_RAD, CHASSIS_FL_STEER_DIR, CHASSIS_FL_DRIVE_DIR}},
     [WHEEL_FR] = {CHASSIS_STEER_FR_CAN_ID, CHASSIS_STEER_FR_MST_ID, CHASSIS_DRIVE_FR_NODE,
-                  { HALF_X_M, -HALF_Y_M, CHASSIS_FR_ZERO_RAD, 1, 1}},
-    [WHEEL_RL] = {CHASSIS_STEER_RL_CAN_ID, CHASSIS_STEER_RL_MST_ID, CHASSIS_DRIVE_RL_NODE,
-                  {-HALF_X_M,  HALF_Y_M, CHASSIS_RL_ZERO_RAD, 1, 1}},
+                  { HALF_X_M, -HALF_Y_M, CHASSIS_FR_ZERO_RAD, CHASSIS_FR_STEER_DIR, CHASSIS_FR_DRIVE_DIR}},
     [WHEEL_RR] = {CHASSIS_STEER_RR_CAN_ID, CHASSIS_STEER_RR_MST_ID, CHASSIS_DRIVE_RR_NODE,
-                  {-HALF_X_M, -HALF_Y_M, CHASSIS_RR_ZERO_RAD, 1, 1}},
+                  {-HALF_X_M, -HALF_Y_M, CHASSIS_RR_ZERO_RAD, CHASSIS_RR_STEER_DIR, CHASSIS_RR_DRIVE_DIR}},
+    [WHEEL_RL] = {CHASSIS_STEER_RL_CAN_ID, CHASSIS_STEER_RL_MST_ID, CHASSIS_DRIVE_RL_NODE,
+                  {-HALF_X_M,  HALF_Y_M, CHASSIS_RL_ZERO_RAD, CHASSIS_RL_STEER_DIR, CHASSIS_RL_DRIVE_DIR}},
 };
 
 typedef struct {
@@ -46,7 +47,7 @@ typedef struct {
 } SwerveWheelInstance;
 
 typedef struct {
-    float vx, vy, wz;
+    float vx, vy, wz, bench_speed_mps;
     uint32_t updated_ms;
     uint8_t enabled, steer_zero_permitted, steer_zero_request;
 } MotionCommand_s;
@@ -54,7 +55,7 @@ typedef struct {
 typedef struct {
     float position_rad[WHEEL_COUNT];
     uint32_t steer_updated_ms[WHEEL_COUNT];
-    uint8_t steer_online, drive_online, steer_enabled, steer_disabled, steer_fault;
+    uint8_t steer_online, drive_online, steer_disabled, steer_fault;
 } WheelFeedback_s;
 
 static SwerveWheelInstance wheels[WHEEL_COUNT];
@@ -71,8 +72,7 @@ static volatile Chassis_Upload_Data_s published_feedback;
 static SwerveTarget_s targets[WHEEL_COUNT];
 static SwervePhase_e phase;
 static SteerCalibration_s calibration;
-static uint8_t fault_mask, init_fault_mask, stop_pending = 1;
-static uint32_t start_ms, last_stop_ms;
+static uint8_t fault_mask, init_fault_mask, steer_ready, stop_pending = 1;
 
 void ChassisInit(void)
 {
@@ -103,21 +103,22 @@ void ChassisInit(void)
 
 void ChassisTask(void)
 {
-    Chassis_Ctrl_Cmd_s cmd = {0};
+    static Chassis_Ctrl_Cmd_s cmd;
+    static uint32_t received_ms;
 #ifdef CHASSIS_BOARD
-    static uint32_t last_board_cmd_ms;
     if (CANCommIsOnline(board_link)) {
         uint32_t mask = __get_PRIMASK();
         __disable_irq();
         if (board_link->update_flag)
-            last_board_cmd_ms = HAL_GetTick();
+            received_ms = HAL_GetTick();
         cmd = *(Chassis_Ctrl_Cmd_s *)CANCommGet(board_link);
         __set_PRIMASK(mask);
-        if (HAL_GetTick() - last_board_cmd_ms > CHASSIS_FEEDBACK_TIMEOUT_MS)
-            cmd.steer_zero_permitted = 0;
+    } else {
+        cmd = (Chassis_Ctrl_Cmd_s){.chassis_mode = CHASSIS_ZERO_FORCE};
     }
 #else
-    SubGetMessage(cmd_sub, &cmd);
+    if (SubGetMessage(cmd_sub, &cmd))
+        received_ms = HAL_GetTick();
 #endif
 
     MotionCommand_s next = {.vx = cmd.vx, .vy = cmd.vy, .wz = cmd.wz, .enabled = 1};
@@ -136,12 +137,13 @@ void ChassisTask(void)
         next.wz = SW_ROTATE_WZ;
         break;
     case CHASSIS_NO_FOLLOW:
+        next.bench_speed_mps = cmd.vx;
         break;
     default:
         next.enabled = 0;
         break;
     }
-    next.updated_ms = HAL_GetTick();
+    next.updated_ms = received_ms;
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     if (!next.steer_zero_permitted && command.steer_zero_permitted)
@@ -168,131 +170,116 @@ static WheelFeedback_s ReadWheels(uint32_t now)
 {
     WheelFeedback_s result = {0};
     for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
-        const volatile DMMotorMeasure_s *dm = &wheels[i].steer_motor->measure;
-        const volatile LK7015Measure_s *lk = &wheels[i].drive_motor->measure;
         uint8_t bit = 1u << i;
-        result.position_rad[i] = dm->position_rad;
-        result.steer_updated_ms[i] = dm->updated_ms;
-        if (dm->valid && now - dm->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS) {
+        const DMMotorInstance *steer = wheels[i].steer_motor;
+        const LK7015MotorInstance *drive = wheels[i].drive_motor;
+        if (steer && steer->measure.valid && now - steer->measure.updated_ms <= CHASSIS_STEER_FEEDBACK_TIMEOUT_MS) {
             result.steer_online |= bit;
-            if (dm->state == 0) result.steer_disabled |= bit;
-            if (dm->state == 1) result.steer_enabled |= bit;
-            if (dm->state >= 8) result.steer_fault |= bit;
+            result.position_rad[i] = steer->measure.position_rad * SW_STEER_RAD_PER_MOTOR_RAD;
+            result.steer_updated_ms[i] = steer->measure.updated_ms;
+            if (!steer->enable_requested) result.steer_disabled |= bit;
+            if (steer->measure.state >= 8) result.steer_fault |= bit;
         }
-        if (lk->valid && now - lk->updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS)
+        if (drive && drive->measure.valid && now - drive->measure.updated_ms <= LK7015_FEEDBACK_TIMEOUT_MS)
             result.drive_online |= bit;
     }
     return result;
 }
 
-static uint8_t SetWheelMode(uint8_t enabled)
+static void UpdateSteer(unsigned i, const MotionCommand_s *motion, const WheelFeedback_s *f, uint8_t probe)
 {
-    uint8_t failed = LK7015SetEnabled(&drive_group, enabled) ? 0 : ALL_WHEELS;
-    for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
-        if (!DMMotorSetEnabled(wheels[i].steer_motor, enabled))
-            failed |= 1u << i;
-    }
-    return failed;
-}
+    uint8_t bit = 1u << i;
+    const SwerveGeometry_s *geometry = &wheel_config[i].geometry;
+    DMMotorInstance *steer = wheels[i].steer_motor;
+    DMMotorPositionRef_s ref = {0};
 
-static void StopWheels(uint32_t now)
-{
-    if (stop_pending || now - last_stop_ms >= CHASSIS_FEEDBACK_TIMEOUT_MS) {
-        uint8_t failed = SetWheelMode(0);
-        last_stop_ms = now;
-        stop_pending = failed != 0;
-        fault_mask |= failed;
-        if (failed)
-            phase = SWERVE_FAULT;
-    }
-}
-
-static void TripFault(uint8_t failed, uint32_t now)
-{
-    phase = SWERVE_FAULT;
-    fault_mask |= failed;
-    stop_pending = 1;
-    StopWheels(now);
-}
-
-static uint8_t SendTargets(uint8_t running)
-{
-    for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
-        DMMotorPositionRef_s ref = {0};
-        float speed_dps = 0;
-        if (running) {
-            ref = (DMMotorPositionRef_s){targets[i].steer_rad, SW_KP, SW_KD};
-            speed_dps = targets[i].speed_mps * WHEEL_DPS_PER_MPS;
+    /* 架空单测时，缺少舵角的轮毂直接响应前后摇杆。 */
+    targets[i].speed_mps = motion->bench_speed_mps * geometry->drive_direction;
+    if (!steer)
+        return;
+    if (!(f->steer_online & bit) || (f->steer_fault & bit)) {
+        steer_ready &= ~bit;
+        if (!probe)
+            return;
+        if (!(f->steer_fault & bit) && !DMMotorSetEnabled(steer, 1))
+            fault_mask |= bit;
+        /* 零增益探测，使晚接入的舵电机能回传当前位置。 */
+    } else {
+        if (!(steer_ready & bit)) {
+            targets[i].steer_rad = f->position_rad[i];
+            if (!DMMotorSetEnabled(steer, 1)) {
+                fault_mask |= bit;
+                return;
+            }
+            steer_ready |= bit;
         }
-        if (!DMMotorSendPosition(wheels[i].steer_motor, ref))
-            return 1u << i;
-        LK7015MotorSetSpeed(wheels[i].drive_motor, speed_dps);
+        if (SwerveSolveWheel(geometry, motion->vx, motion->vy, motion->wz,
+                             f->position_rad[i], SW_STEER_MAX_RAD, &targets[i])) {
+            ref = (DMMotorPositionRef_s){targets[i].steer_rad * SW_MOTOR_RAD_PER_STEER_RAD, SW_KP, SW_KD};
+        } else {
+            fault_mask |= bit;
+        }
     }
-    return LK7015SendSpeeds(&drive_group) ? 0 : ALL_WHEELS;
+    if (!DMMotorSendPosition(steer, ref))
+        fault_mask |= bit;
 }
 
 static void UpdateWheels(MotionCommand_s motion, uint8_t stop, const WheelFeedback_s *f, uint32_t now)
 {
-    if (!motion.enabled || stop) {
-        if (phase != SWERVE_OFF) stop_pending = 1;
-        phase = SWERVE_OFF;
-        fault_mask = 0;
-        StopWheels(now);
+    static uint32_t last_probe_ms, last_drive_mode_ms;
+    uint8_t running = motion.enabled && !stop;
+    SwervePhase_e next = running ? SWERVE_RUNNING : SWERVE_OFF;
+    uint8_t changed = next != phase;
+    uint8_t immediate = changed || stop_pending;
+    uint8_t probe = immediate || now - last_probe_ms >= CHASSIS_STEER_IDLE_PERIOD_MS;
+    phase = next;
+    if (!running && !probe)
         return;
-    }
-    if (phase == SWERVE_FAULT) {
-        StopWheels(now);
-        return;
-    }
-    if (now - motion.updated_ms > CHASSIS_FEEDBACK_TIMEOUT_MS ||
-        !isfinite(motion.vx) || !isfinite(motion.vy) || !isfinite(motion.wz)) {
-        TripFault(ALL_WHEELS, now);
-        return;
-    }
-    if (f->steer_fault) {
-        TripFault(f->steer_fault, now);
-        return;
-    }
-    if (phase == SWERVE_OFF) {
-        uint8_t failed = SetWheelMode(1);
-        if (failed) {
-            TripFault(failed, now);
-            return;
+    if (probe)
+        last_probe_ms = now;
+
+    stop_pending = 0;
+    fault_mask = init_fault_mask | f->steer_fault;
+    if (drive_group.sender.can_handle &&
+        (immediate || now - last_drive_mode_ms >= CHASSIS_DRIVE_ENABLE_REPEAT_MS)) {
+        if (LK7015SetEnabled(&drive_group, running || CHASSIS_DRIVE_IDLE_KEEPALIVE)) {
+            last_drive_mode_ms = now;
+        } else {
+            fault_mask |= ALL_WHEELS;
+            if (!running) stop_pending = 1;
         }
-        start_ms = now;
-        phase = SWERVE_STARTING;
-        return;
     }
 
-    uint8_t missing = ALL_WHEELS & ~(f->steer_enabled & f->drive_online);
-    if (phase == SWERVE_STARTING) {
-        if (now - start_ms > CHASSIS_START_TIMEOUT_MS) {
-            TripFault(missing ? missing : ALL_WHEELS, now);
-            return;
+    if (running) {
+        /* 过期或无效的速度给定回中，电机仍保持当前遥控模式。 */
+        if (now - motion.updated_ms > CHASSIS_FEEDBACK_TIMEOUT_MS ||
+            !isfinite(motion.vx) || !isfinite(motion.vy) || !isfinite(motion.wz))
+            motion.vx = motion.vy = motion.wz = motion.bench_speed_mps = 0.0f;
+        for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
+            UpdateSteer(i, &motion, f, probe);
+            if (!(f->drive_online & (1u << i)))
+                targets[i].speed_mps = 0.0f;
         }
-        if (missing || now - start_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS) {
-            uint8_t failed = SendTargets(0);
-            if (failed) TripFault(failed, now);
-            return;
+        SwerveLimitSpeeds(targets, SW_VWHEEL);
+    } else {
+        steer_ready = 0;
+        for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
+            targets[i].speed_mps = 0.0f;
+            if (wheels[i].steer_motor && !DMMotorSetEnabled(wheels[i].steer_motor, 0)) {
+                fault_mask |= 1u << i;
+                stop_pending = 1;
+            }
         }
-        for (unsigned i = 0; i < WHEEL_COUNT; ++i)
-            targets[i].steer_rad = f->position_rad[i];
-        phase = SWERVE_RUNNING;
-    }
-    if (missing) {
-        TripFault(missing, now);
-        return;
     }
     for (unsigned i = 0; i < WHEEL_COUNT; ++i) {
-        if (!SwerveSolveWheel(&wheel_config[i].geometry, motion.vx, motion.vy, motion.wz,
-                              f->position_rad[i], SW_PMAX, &targets[i])) {
-            TripFault(1u << i, now);
-            return;
-        }
+        if (wheels[i].drive_motor)
+            LK7015MotorSetSpeed(wheels[i].drive_motor, targets[i].speed_mps * WHEEL_DPS_PER_MPS);
     }
-    SwerveLimitSpeeds(targets, SW_VWHEEL);
-    uint8_t failed = SendTargets(1);
-    if (failed) TripFault(failed, now);
+    if (drive_group.sender.can_handle && (running || CHASSIS_DRIVE_IDLE_KEEPALIVE || immediate) &&
+        !LK7015SpeedLoopStep(&drive_group, running)) {
+        fault_mask |= ALL_WHEELS;
+        if (!running) stop_pending = 1;
+    }
 }
 
 /* 等待停机帧入队期间，命令和电机反馈都可能更新。设零前重新取快照。 */
@@ -340,20 +327,10 @@ void ChassisMotorTask(void)
     uint8_t stop = stop_requested;
     stop_requested = 0;
     now = HAL_GetTick();
-    WheelFeedback_s f = {0};
-    if (!init_fault_mask)
-        f = ReadWheels(now);
+    WheelFeedback_s f = ReadWheels(now);
     __set_PRIMASK(mask);
 
-    if (calibration.phase != STEER_ZERO_IDLE && calibration.phase != STEER_ZERO_SUCCESS)
-        motion.enabled = 0; // 校准中或失败后保持停机，完整重校成功才允许启动
-    if (init_fault_mask) {
-        phase = SWERVE_FAULT;
-        fault_mask = init_fault_mask;
-    } else {
-        UpdateWheels(motion, stop, &f, now);
-    }
-
+    UpdateWheels(motion, stop, &f, now);
     UpdateSteerCalibration(&f, &motion, now);
 
     mask = __get_PRIMASK();

@@ -9,6 +9,8 @@ typedef struct {
 
 typedef struct {
     float position_rad, velocity_rad_s, torque_nm;
+    /* 错误码，不是使能状态。仅 ESC_ID ≤ 15 时有效(达妙 D[0] 高 4 位)，
+     * ESC_ID 更大时 D[0] 是整字节 ID，这里恒为 0(无从得知错误码)。 */
     uint8_t state, mos_temp_c, rotor_temp_c;
     uint32_t updated_ms;
     uint8_t valid;
@@ -23,7 +25,7 @@ typedef struct {
     DMMotorPositionRef_s reference;
     DMMotorLimits_s limits;
     CANInstance *motor_can_instance;
-    uint8_t enable_requested;
+    uint8_t enable_requested; // 最近一次下发的使能命令。反馈里没有可靠的使能位，上层据此判断
 } DMMotorInstance;
 
 DMMotorInstance *DMMotorInit(CAN_Init_Config_s can, DMMotorLimits_s limits);

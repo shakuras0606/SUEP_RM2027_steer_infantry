@@ -13,6 +13,14 @@ static float DecodeSigned(unsigned value, unsigned full_scale, float limit)
     return (2.0f * limit / full_scale) * value - limit;
 }
 
+/* 达妙 MIT 反馈 D[0] = (错误码 << 4) | (ESC_ID & 0x0F)，只有 ESC_ID ≤ 15 时
+ * 高 4 位才是错误码。ESC_ID 更大时(本底盘用 0x51~0x54)D[0] 回的是整个字节的
+ * ESC_ID，高位属于 ID，按错误码读会恒定得到 5(0x51>>4)。 */
+static uint8_t DecodeErrorCode(const CANInstance *can)
+{
+    return can->tx_id < 0x10u ? (uint8_t)(can->rx_buff[0] >> 4) : 0u;
+}
+
 static void DecodeDMMotor(CANInstance *can)
 {
     DMMotorInstance *motor = can->id;
@@ -21,7 +29,7 @@ static void DecodeDMMotor(CANInstance *can)
         return;
 
     DMMotorMeasure_s measure = {
-        .state = data[0] >> 4,
+        .state = DecodeErrorCode(can),
         .position_rad = DecodeSigned((data[1] << 8) | data[2], 65535, motor->limits.position_rad),
         .velocity_rad_s = DecodeSigned((data[3] << 4) | (data[4] >> 4), 4095, motor->limits.velocity_rad_s),
         .torque_nm = DecodeSigned(((data[4] & 15u) << 8) | data[5], 4095, motor->limits.torque_nm),
@@ -64,8 +72,11 @@ uint8_t DMMotorSetEnabled(DMMotorInstance *motor, uint8_t enabled)
 
 uint8_t DMMotorSaveZero(DMMotorInstance *motor)
 {
+    /* 只要求"本驱动没有使能它"且已有反馈。不能用 measure.state 判断失能：
+     * 那是错误码(且 ESC_ID>15 时根本不可用)，与使能状态无关。设零是否真的生效
+     * 由调用方在后续反馈里核对位置是否归零。 */
     if (!motor || !motor->motor_can_instance || motor->enable_requested ||
-        !motor->measure.valid || motor->measure.state != 0)
+        !motor->measure.valid)
         return 0;
     return SendSpecialFrame(motor, 0xfe);
 }

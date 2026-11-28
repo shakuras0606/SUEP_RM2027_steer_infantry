@@ -71,7 +71,7 @@ static void SetChassisMode(const RC_ctrl_t *rc, uint8_t online)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.vx = chassis_cmd_send.vy = chassis_cmd_send.wz = 0;
     } else if (switch_is_mid(rc->rc.switch_right)) {
-        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
     } else if (switch_is_up(rc->rc.switch_right)) {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
     }
@@ -190,6 +190,7 @@ static void RemoteControlSet(const RC_ctrl_t *rc, uint8_t zero_gesture)
     // 底盘前进/横移由右摇杆给出,单位 m/s;旋转由底盘按当前模式生成
     chassis_cmd_send.vx =  SW_VXY * SwerveStick(rc_data[TEMP].rc.rocker_r1);
     chassis_cmd_send.vy = -SW_VXY * SwerveStick(rc_data[TEMP].rc.rocker_r_);
+    chassis_cmd_send.wz = -SW_WZ  * SwerveStick(rc_data[TEMP].rc.rocker_l_);
 
     // 发射参数
 

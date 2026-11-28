@@ -50,7 +50,7 @@ typedef enum
 } Robot_Status_e;
 
 typedef enum {
-    SWERVE_OFF, SWERVE_STARTING, SWERVE_RUNNING, SWERVE_FAULT
+    SWERVE_OFF = 0, SWERVE_RUNNING = 2  // 保留 chassis_feed 的线上编码
 } SwervePhase_e;
 
 // 应用状态
@@ -174,7 +174,7 @@ typedef struct
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
 
-    // 在线和故障掩码的 bit 0..3 分别代表左前、右前、左后、右后。
+    // 在线和故障掩码的 bit 0..3 按顺时针依次为左前 FL、右前 FR、右后 RR、左后 RL。
     uint8_t swerve_phase;       // SwervePhase_e
     uint8_t steer_online_mask;
     uint8_t drive_online_mask;

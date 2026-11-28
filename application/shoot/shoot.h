@@ -2,7 +2,7 @@
 #define SHOOT_H
 
 /* 摩擦轮: DJI M3508 + C620 电调, 节点号 1/2, 挂载在 CAN2 */
-#define SHOOT_MOTOR_CAN         (&hcan2)
+#define SHOOT_MOTOR_CAN         (&hcan3)
 #define SHOOT_FRICTION_L_CAN_ID 1u
 #define SHOOT_FRICTION_R_CAN_ID 2u
 

@@ -28,6 +28,24 @@
 *.uvguix.*
 *.uvoptx
 
+# ==================== AI 助手 / Agent 工作区 ====================
+# EmberProbe、Claude Code、Cursor、Codex 等工具生成的本地技能包、会话缓存与规则文件，
+# 只对个人本机的助手有效，与固件源码无关
+/.agents/
+/.claude/
+/.cursor/
+/.codex/
+/.windsurf/
+/.continue/
+/.specstory/
+/.roo/
+/.aider*
+/AGENTS.local.md
+
+# ==================== 临时草稿 ====================
+# 抓取厂商协议、反编译工具包、docx 转 markdown 等一次性脚本与中间产物
+/.tmp/
+
 # ==================== 调试器个人配置 ====================
 # Ozone 的个人窗口布局/断点/打开的文件列表
 *.jdebug.user
@@ -59,3 +77,14 @@ Desktop.ini
 /Drivers/CMSIS/DSP/Examples/
 /Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
 /Drivers/CMSIS/DSP/PythonWrapper/
+
+# 以下素材在 README / .Doc / 模块 md 中均无任何引用，保留在本地即可
+# 未被引用的旧截图（约 9 KB）
+/.assets/image-20221113125439857.png
+# BMI088 数据手册（1.5 MB）：需要时从 Bosch 官网获取
+/modules/BMI088/bmi088-datasheet.pdf
+# 海泰 HT04 驱动器硬件说明（268 KB）：控制报文以 modultest/HT04.md 与 控制报文.png 为准
+/modules/motor/HTmotor/驱动器硬件说明.pdf
+# LK 电机报文格式截图（439 KB）：协议以 LK-TECH电机CAN协议说明V2_3.pdf 与 lk7015_motor.c 为准
+/modules/motor/LKmotor/报文格式.png
+/modules/motor/LKmotor/反馈报文.png
